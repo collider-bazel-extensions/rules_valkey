@@ -12,7 +12,7 @@ VALKEY_TOOLCHAIN_TYPE = Label("//toolchain:valkey")
 
 def _toolchain_impl(ctx):
     files = depset(
-        [ctx.file.server, ctx.file.cli, ctx.file.check_rdb, ctx.file.check_aof],
+        [ctx.file.server, ctx.file.cli, ctx.file.check_rdb, ctx.file.check_aof, ctx.file.openssl],
         transitive = [ctx.attr.libs[DefaultInfo].files],
     )
     info = ValkeyBinaryInfo(
@@ -21,6 +21,7 @@ def _toolchain_impl(ctx):
         cli       = ctx.file.cli,
         check_rdb = ctx.file.check_rdb,
         check_aof = ctx.file.check_aof,
+        openssl   = ctx.file.openssl,
         files     = files,
     )
     return [
@@ -36,6 +37,7 @@ valkey_toolchain = rule(
         "cli":       attr.label(allow_single_file = True, mandatory = True),
         "check_rdb": attr.label(allow_single_file = True, mandatory = True),
         "check_aof": attr.label(allow_single_file = True, mandatory = True),
+        "openssl":   attr.label(allow_single_file = True, mandatory = True),
         "libs":      attr.label(mandatory = True),
     },
 )

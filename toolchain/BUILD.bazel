@@ -20,6 +20,7 @@ valkey_toolchain(
     cli       = "@valkey_9_1_3_linux_amd64//:valkey_cli",
     check_rdb = "@valkey_9_1_3_linux_amd64//:valkey_check_rdb",
     check_aof = "@valkey_9_1_3_linux_amd64//:valkey_check_aof",
+    openssl   = "@valkey_9_1_3_linux_amd64//:openssl",
     libs      = "@valkey_9_1_3_linux_amd64//:libs",
 )
 
@@ -38,6 +39,7 @@ valkey_toolchain(
     cli       = "@valkey_9_1_3_linux_arm64//:valkey_cli",
     check_rdb = "@valkey_9_1_3_linux_arm64//:valkey_check_rdb",
     check_aof = "@valkey_9_1_3_linux_arm64//:valkey_check_aof",
+    openssl   = "@valkey_9_1_3_linux_arm64//:openssl",
     libs      = "@valkey_9_1_3_linux_arm64//:libs",
 )
 
@@ -56,6 +58,7 @@ valkey_toolchain(
     cli       = "@valkey_9_1_3_darwin_amd64//:valkey_cli",
     check_rdb = "@valkey_9_1_3_darwin_amd64//:valkey_check_rdb",
     check_aof = "@valkey_9_1_3_darwin_amd64//:valkey_check_aof",
+    openssl   = "@valkey_9_1_3_darwin_amd64//:openssl",
     libs      = "@valkey_9_1_3_darwin_amd64//:libs",
 )
 
@@ -74,6 +77,7 @@ valkey_toolchain(
     cli       = "@valkey_9_1_3_darwin_arm64//:valkey_cli",
     check_rdb = "@valkey_9_1_3_darwin_arm64//:valkey_check_rdb",
     check_aof = "@valkey_9_1_3_darwin_arm64//:valkey_check_aof",
+    openssl   = "@valkey_9_1_3_darwin_arm64//:openssl",
     libs      = "@valkey_9_1_3_darwin_arm64//:libs",
 )
 

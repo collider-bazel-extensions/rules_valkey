@@ -45,12 +45,37 @@ The check runs on the conda binary with no network: loopback and a unix socket o
   - If any node dies, all are stopped.
   - The socket dir is removed on exit.
 
+### Stop and start (v0.2, #1)
+
+- **The endpoint.** The launcher runs a small HTTP control endpoint (`VALKEY_CONTROL_URL`: `POST /stop`, `/start`, optional `?node=N`), as rules_flagd and rules_otel do. HTTP rather than signals, because `/start` must report whether the server came back.
+- **Stopping** is a SIGTERM: Valkey's `SHUTDOWN` path, which saves an RDB when save points are configured (the default) and fsyncs the AOF. The node is marked as stopped on request, so the launcher doesn't treat its exit as a crash.
+- **Starting** reuses the node's exact argv (port, cluster bus port, data dir, password, TLS) and appends to its log. Readiness is judged on this start's part of the log and a real `PING`.
+- **A taken port.** Each port is bind-checked (127.0.0.1 with `SO_REUSEADDR`, as valkey-server binds) before the start. A taken port is retried 5 times, 0.2 s apart, then reported as a 500 naming it. These are lessons from rules_flagd v0.3.0, where a failed bind cost a 5 s drain.
+- **Cluster nodes** restart individually and rejoin from `nodes.conf`. After a start the launcher waits for `cluster_state:ok` on every node.
+
+### TLS (v0.2, #1)
+
+- **TLS only.** `tls = True` runs `--port 0 --tls-port P`: no plaintext listener and no unix socket. Clusters add `--tls-cluster yes --tls-replication yes`.
+- **Certificates.** The conda closure ships `bin/openssl`, so the launcher makes a throwaway CA, a server certificate (SAN `127.0.0.1`, `localhost`; serverAuth + clientAuth, since replication connects with it) and a client certificate.
+  - That openssl looks for its config under its build-time prefix, so the launcher passes a minimal `OPENSSL_CONF`.
+  - The CA carries `basicConstraints=critical,CA:TRUE` and the leaves key identifiers. Python 3.13+ verifies strictly and rejects a CA without them.
+- **Your own certificates:** `tls_cert` / `tls_key` / `tls_ca`, plus the client pair when `tls_auth_clients` is set. Analysis refuses incomplete sets.
+- **Inside the launcher,** readiness `PING`s go through Python's `ssl`, and seeds through `valkey-cli --tls`.
+
+### Watching the server
+
 `valkey_test` uses rules_nats' fixed trampoline (v0.1.1):
 - it removes its own arguments before the test sees `"$@"`;
 - it runs the test rather than `exec`ing it, so its EXIT trap stops the servers;
 - HUP, INT and TERM exit 129, 130 and 143.
 
 `//tests:server_cleanup_test` fails if the trampoline `exec`s.
+
+Since v0.2 (#1) the trampoline also watches the server:
+- it runs the test in the background (stdin kept) and polls both pids, because bash 3.2 (macOS) has no `wait -n`;
+- if the launcher exits first, which `valkey_stop` doesn't cause, it stops the test's whole process tree (walked with `pgrep -P`, exact parent pid). It then fails with the server's status and the tail of `$VALKEY_LOG`.
+
+Otherwise the test's own exit status is returned. Killing only the test's shell isn't enough: in the first version an orphaned `sleep` kept the test's output open for a minute.
 
 ## Cluster install
 
@@ -63,7 +88,7 @@ The check runs on the conda binary with no network: loopback and a unix socket o
 
 ## What this repo does not (yet) do
 
-- **TLS** on the hermetic server: `tls-port` and certificates.
 - **Sentinel** and Valkey modules (`loadmodule`; conda-forge ships no modules).
+- **TLS on the unix socket** and per-client certificate subjects (ACL `CN` mapping).
 - **Replicas or persistence in the install**, and the chart's `auth.aclUsers`. These would need re-rendering with other values.
 - **Non-shell `valkey_test`.** Use `valkey_server` + `valkey_health_check` through rules_itest.

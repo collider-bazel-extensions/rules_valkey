@@ -25,12 +25,12 @@ rules_valkey/
 │   ├── repositories.bzl      # per-platform repo: .conda zip → pkg-*.tar.zst, merged (Bazel extracts both)
 │   ├── providers.bzl         # ValkeyBinaryInfo (incl. libs), ValkeyConfigInfo
 │   ├── config.bzl            # valkey_config (+ validation action)
-│   ├── launcher.py           # `check`, `serve` (standalone / cluster, seed, rdb), `stage-for-chart`
+│   ├── launcher.py           # `check`, `serve` (standalone / cluster, seed, rdb, TLS, control endpoint), `stage-for-chart`
 │   ├── server.bzl            # valkey_server, valkey_health_check, ValkeyServerInfo
 │   ├── server.sh.tmpl        # runfiles resolution (into variables) → launcher.py serve
 │   ├── test.bzl              # valkey_test
-│   ├── valkey_test_trampoline.sh  # server → env → test (not exec)
-│   ├── testlib.sh            # vk, vk_wait, vk_flush
+│   ├── valkey_test_trampoline.sh  # server → env → test (not exec), watching the server
+│   ├── testlib.sh            # vk, vk_opts, vk_wait, vk_flush, valkey_stop, valkey_start
 │   ├── install.bzl           # valkey_install(+config), valkey_install_health_check
 │   ├── install_config.awk    # replaces the chart's valkey-config ConfigMap data
 │   └── manifests/valkey.yaml # rendered chart (committed; do not hand-edit)
@@ -39,9 +39,15 @@ rules_valkey/
 ├── tools/                    # update_conda_versions.py; chart pin + render flow
 └── tests/
     ├── BUILD.bazel
-    ├── analysis_tests.bzl    # provider, executables, bad shards/replicas/rdb/timeout, install+ACL
+    ├── analysis_tests.bzl    # provider, executables, bad shards/replicas/rdb/timeout, install+ACL, TLS attrs
     ├── testdata/             # valkey.conf (host paths), users.acl, seeds, bad configs, dump.rdb,
-    │                         # install_config (genrule: also the generated-input regression)
+    │                         # install_config (genrule: also the generated-input regression),
+    │                         # no_persistence / aof configs, certs (genrule, toolchain openssl)
+    ├── make_certs.sh         # the certs genrule
+    ├── restart_test.sh       # valkey_stop/start: client fails, same port, data kept (RDB, AOF) / empty
+    ├── cluster_restart_test.sh, restart_failure_test.sh  # one node / all; held port → 500, retry
+    ├── tls_test.sh           # TLS standalone / mutual / cluster / own certs; plaintext refused
+    ├── server_died_test.sh   # (+ dies.sh, exit3.sh) server dies mid-test → stopped, named; own status kept
     ├── api_test.sh           # config + ACL users + seed + socket + helpers + args
     ├── password_test.sh, cluster_test.sh (3+3), rdb_test.sh
     ├── config_check_test.sh  # check mode: good; bad value / directive (line kept) / bad ACL
@@ -60,14 +66,18 @@ rules_valkey/
 - **Readiness.** `+PONG` (AUTH first with a password; `-LOADING` is not ready). In a cluster, every node has `cluster_state:ok` and knows all nodes. Seeds have run.
 - **Seeds** go through `valkey-cli --no-raw` (`-c` in a cluster); any `(error)` line fails. `valkey-cli -e` does not catch piped errors.
 - **Cluster.** Each node gets an explicit `--cluster-port` (a second free port). Shards ≥ 3; replicas only with shards; no rdb in a cluster.
-- **Shutdown.** Handlers are installed before start. Once ready, they only terminate and arm kill timers. Any node exiting stops all.
+- **Shutdown.** Handlers are installed before start. Once ready, they only terminate and arm kill timers. Any node exiting (not stopped on request) stops all.
+- **Stop / start.** Control endpoint `POST /stop|/start[?node=N]`: SIGTERM (Valkey saves RDB / fsyncs AOF), then the node's same argv; ports bind-checked first, 5 × 0.2 s retries, 500 naming the port.
+- **TLS.** `--port 0 --tls-port P` (+ tls-cluster/-replication). Certs from the closure's `bin/openssl` with a minimal `OPENSSL_CONF`; CA needs `CA:TRUE` + key identifiers (Python 3.13 strict).
+- **Watching.** The trampoline backgrounds the test and polls both pids (bash 3.2); if the server dies first, it kills the test's process tree (`pgrep -P`) and fails with the status and `$VALKEY_LOG` tail.
 
 ## Public API
 
 ```python
 load("@rules_valkey//:defs.bzl",
     "valkey_config",               # src, acl
-    "valkey_server",               # config, password, seed, rdb, shards, replicas, ready_timeout, extra_args
+    "valkey_server",               # config, password, seed, rdb, shards, replicas, ready_timeout, extra_args,
+                                   # tls, tls_auth_clients, tls_cert/key/ca, tls_client_cert/key
     "valkey_health_check",         # server
     "valkey_test",                 # srcs + valkey_server attrs + args, env, data, deps, ...
     "valkey_install",              # namespace, config, wait_timeout
@@ -90,11 +100,11 @@ To find stray servers, use `pgrep -x valkey-server` (an exact process name), nev
 
 ### Test results (last full run: 2026-11-04)
 
-All 23 test targets pass on Linux x86_64 (Valkey 9.1.3): 22 in `//tests/...` and the kind smoke on rootless podman. Other checks:
-- 56 parallel runs of the server tests, the 6-node cluster test included, passed with no stray servers or socket dirs.
+All 35 test targets in `//tests/...` pass on Linux x86_64 (Valkey 9.1.3), 13 of them analysis tests; the kind smoke (install unchanged since v0.1.0) runs in CI. Other checks:
+- 5 runs each of 15 server tests in parallel (restart, TLS and cluster ones included) passed with no stray servers.
 - Checked by hand:
   - a bad config fails `bazel build`, even with network blocked in the sandbox;
-  - switching the trampoline back to `exec` fails `server_cleanup_test`.
+  - switching the trampoline back to `exec` fails `server_cleanup_test` (still, with the watching trampoline).
 - A scratch consumer module ran a configured `valkey_test` and a 3-shard one.
 
 | Test target | What it verifies | Result |
@@ -107,15 +117,20 @@ All 23 test targets pass on Linux x86_64 (Valkey 9.1.3): 22 in `//tests/...` and
 | `//tests:server_test` | extra_args, caller VALKEYCLI_AUTH ignored, SIGTERM exit 0, port + socket gone | PASSED |
 | `//tests:server_failure_test` | bad flag, failing seed (named; server stopped), timeout, test body skipped | PASSED |
 | `//tests:server_cleanup_test` | servers stopped when a valkey_test ends | PASSED |
+| `//tests:restart_test`, `restart_aof_test`, `restart_no_persistence_test` | stop: clients fail; start: same port, password; data kept (RDB, AOF) / empty | PASSED |
+| `//tests:cluster_restart_test` | one node and the whole cluster restarted; data and cluster_state ok; bad node index | PASSED |
+| `//tests:restart_failure_test` | held port → 500 naming it; starts later; brief hold retried | PASSED |
+| `//tests:tls_test`, `tls_mutual_test`, `tls_cluster_test`, `tls_provided_test` | TLS only (plaintext refused), rediss URL, vk + Python ssl client, mutual TLS, cluster bus, own certs, restart | PASSED |
+| `//tests:server_died_test` | server dies mid-test → test stopped within seconds, status + log tail; test's own exit status kept | PASSED |
 | `//tests:itest_test` | valkey_server + health check as an itest_service | PASSED |
 | `//tests:install_config_test` | only valkey-config changes; host/network directives neutralized | PASSED |
 | `//tests:health_check_test`, `//tests:checksums_test` | env-file probe; conda pins | PASSED |
-| `//tests:analysis_tests` (10) | provider, executables, shards < 3, lone replicas, cluster + rdb, timeout, install + ACL | PASSED |
+| `//tests:analysis_tests` (13) | provider, executables, shards < 3, lone replicas, cluster + rdb, timeout, install + ACL, TLS attribute sets | PASSED |
 | `//tests/install_smoke:smoke_test` | kind, namespace `cache`: our config runs, data via the Service from a second pod | PASSED |
 
 ## Known limitations
 
 - `python3` is required on the host: the validation action, the launcher and the install overlay.
-- No TLS, Sentinel or modules on the hermetic server.
+- No Sentinel or modules on the hermetic server; under TLS there's no unix socket.
 - The install is one primary with no persistence; ACL files aren't installed.
 - `valkey_test` wraps `sh_test`; other languages use `valkey_server` through rules_itest.

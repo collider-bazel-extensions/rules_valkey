@@ -14,6 +14,8 @@ load(":analysis_tests.bzl", "analysis_test_suite")
 
 _SEED = ["//tests/testdata:seed.valkey"]
 
+exports_files(["make_certs.sh"])
+
 # ---- config -----------------------------------------------------------------
 
 # The validation action, run directly on good and bad configs.
@@ -68,6 +70,119 @@ valkey_test(
     name = "rdb_test",
     srcs = ["rdb_test.sh"],
     rdb = "//tests/testdata:dump.rdb",
+)
+
+# ---- restarts (valkey_stop / valkey_start) ------------------------------------
+
+# Valkey's default save points: an RDB is written on stop.
+valkey_test(
+    name = "restart_test",
+    srcs = ["restart_test.sh"],
+    args = ["kept"],
+    password = "pw",
+)
+
+valkey_test(
+    name = "restart_aof_test",
+    srcs = ["restart_test.sh"],
+    args = ["kept"],
+    config = "//tests/testdata:aof",
+)
+
+valkey_test(
+    name = "restart_no_persistence_test",
+    srcs = ["restart_test.sh"],
+    args = ["empty"],
+    config = "//tests/testdata:no_persistence",
+)
+
+valkey_test(
+    name = "cluster_restart_test",
+    srcs = ["cluster_restart_test.sh"],
+    replicas = 1,
+    shards = 3,
+)
+
+valkey_test(
+    name = "restart_failure_test",
+    srcs = ["restart_failure_test.sh"],
+)
+
+# ---- TLS ----------------------------------------------------------------------
+
+valkey_test(
+    name = "tls_test",
+    srcs = ["tls_test.sh"],
+    args = ["standalone"],
+    password = "pw",
+    seed = _SEED,
+    tls = True,
+)
+
+valkey_test(
+    name = "tls_mutual_test",
+    srcs = ["tls_test.sh"],
+    args = ["mutual"],
+    tls = True,
+    tls_auth_clients = True,
+)
+
+valkey_test(
+    name = "tls_cluster_test",
+    srcs = ["tls_test.sh"],
+    args = ["cluster"],
+    seed = _SEED,
+    shards = 3,
+    replicas = 1,
+    tls = True,
+)
+
+valkey_test(
+    name = "tls_provided_test",
+    srcs = ["tls_test.sh"],
+    args = ["provided"],
+    tls = True,
+    tls_auth_clients = True,
+    tls_ca = "//tests/testdata:certs/ca.crt",
+    tls_cert = "//tests/testdata:certs/server.crt",
+    tls_client_cert = "//tests/testdata:certs/client.crt",
+    tls_client_key = "//tests/testdata:certs/client.key",
+    tls_key = "//tests/testdata:certs/server.key",
+)
+
+# ---- the trampoline watches the server -------------------------------------------
+
+valkey_test(
+    name = "server_dies",
+    srcs = ["dies.sh"],
+    tags = ["manual"],
+)
+
+valkey_test(
+    name = "exit3",
+    srcs = ["exit3.sh"],
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "server_died_test",
+    srcs = ["server_died_test.sh"],
+    args = [
+        "$(rootpath //private:valkey_test_trampoline.sh)",
+        "$(rootpath //private:testlib.sh)",
+        "$(rootpath :server_dies_valkey)",
+        "$(rootpath :server_dies_inner)",
+        "$(rootpath :exit3_valkey)",
+        "$(rootpath :exit3_inner)",
+    ],
+    data = [
+        ":exit3_inner",
+        ":exit3_valkey",
+        ":server_dies_inner",
+        ":server_dies_valkey",
+        "//private:testlib.sh",
+        "//private:valkey_test_trampoline.sh",
+    ],
 )
 
 valkey_server(

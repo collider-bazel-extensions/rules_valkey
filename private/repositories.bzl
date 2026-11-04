@@ -21,6 +21,10 @@ filegroup(name = "valkey_check_rdb", srcs = ["bin/valkey-check-rdb"])
 
 filegroup(name = "valkey_check_aof", srcs = ["bin/valkey-check-aof"])
 
+# The closure's OpenSSL CLI: valkey_server(tls = True) makes its test
+# certificates with it.
+filegroup(name = "openssl", srcs = ["bin/openssl"])
+
 # Shared libraries the binaries load through their RPATH.
 filegroup(name = "libs", srcs = glob(["lib/**"], allow_empty = True))
 """
@@ -46,9 +50,9 @@ def _impl(rctx):
         rctx.extract(inner[0], output = ".")
     rctx.delete("_dl")
 
-    for b in ("valkey-server", "valkey-cli"):
+    for b in ("valkey-server", "valkey-cli", "openssl"):
         if not rctx.path("bin/" + b).exists:
-            fail("rules_valkey: bin/{} missing from the valkey-server package".format(b))
+            fail("rules_valkey: bin/{} missing from the conda closure".format(b))
     rctx.file("BUILD.bazel", _BUILD)
 
 valkey_binary_repo = repository_rule(

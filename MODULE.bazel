@@ -23,7 +23,7 @@ Pinned: Valkey 9.1.3 (conda-forge valkey-server closure), valkey-io
 
 module(
     name = "rules_valkey",
-    version = "0.1.0",
+    version = "0.2.0",
 )
 
 bazel_dep(name = "bazel_skylib", version = "1.8.2")
