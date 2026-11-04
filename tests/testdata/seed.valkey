@@ -1,0 +1,5 @@
+SET app:greeting "hello world"
+HSET app:user:1 name ada email ada@example.com
+RPUSH app:queue job-1 job-2 job-3
+ZADD leaderboard 10 alice 25 bob 17 carol
+SET other:secret classified

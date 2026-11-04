@@ -1,0 +1,46 @@
+"""Maintainer-only render flow.
+
+Pipeline:
+  @valkey_chart_<ver>//:files
+                       │
+                       ▼  helm_template (rules_helm)
+                       ▼
+       bazel-bin/tools/render_valkey_<ver>.yaml
+                       │
+                       ▼  bazel run //tools:render_writeback_<ver>
+                       ▼
+   private/manifests/valkey.yaml (committed; what consumers apply)
+
+No host helm needed at any point.
+"""
+
+load("@rules_helm//:defs.bzl", "helm_template")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+exports_files([
+    "render_valkey.sh",
+    "update_conda_versions.py",
+    "versions.bzl",
+])
+
+# ---- 0.12.1 -----------------------------------------------------------------
+
+helm_template(
+    name = "render_valkey_0_12_1",
+    chart = ["@valkey_chart_0_12_1//:files"],
+    values = ["//config:valkey-values.yaml"],
+    namespace = "valkey",
+    release_name = "valkey",
+    include_crds = True,
+)
+
+sh_binary(
+    name = "render_writeback_0_12_1",
+    srcs = ["writeback.sh"],
+    data = [":render_valkey_0_12_1"],
+    args = [
+        "$(rootpath :render_valkey_0_12_1)",
+        "private/manifests/valkey.yaml",
+    ],
+    visibility = ["//visibility:public"],
+)

@@ -1,0 +1,2 @@
+SET ok 1
+INCR not-a-number-key extra-arg

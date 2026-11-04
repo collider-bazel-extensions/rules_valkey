@@ -1,0 +1,26 @@
+load("@rules_valkey//:defs.bzl", "valkey_config")
+
+package(default_visibility = ["//tests:__subpackages__"])
+
+exports_files(glob(["**"]))
+
+# The production-shaped config: host paths overridden, ACL file supplied.
+valkey_config(
+    name = "config",
+    src = "valkey.conf",
+    acl = "users.acl",
+)
+
+# The same settings without the ACL file (aclfile line dropped), for the
+# cluster install, whose pre-rendered chart mounts only valkey.conf.
+genrule(
+    name = "install_conf",
+    srcs = ["valkey.conf"],
+    outs = ["install/valkey.conf"],
+    cmd = "grep -v '^aclfile' $< > $@",
+)
+
+valkey_config(
+    name = "install_config",
+    src = ":install_conf",
+)

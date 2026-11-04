@@ -1,0 +1,15 @@
+# Render values for the committed manifest (tools/render_valkey.sh).
+#
+# Standalone (one primary, no replicas), no persistence: a test fixture,
+# not a production deployment. Object names are fixed to `valkey`, which
+# valkey_install's rollout wait and config overlay rely on.
+fullnameOverride: valkey
+
+readinessProbe:
+  enabled: true
+
+# Rendered so the manifest has the ConfigMap valkey_install(config = ...)
+# replaces; the chart's own settings are kept when no config is given.
+valkeyConfig: |
+  # rules_valkey default: the chart's settings, nothing more.
+  appendonly no

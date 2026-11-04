@@ -1,0 +1,92 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  hermetic:
+    # valkey_config checks, the hermetic server (standalone, cluster) /
+    # valkey_test suite, install-manifest + analysis tests and the conda pins. No
+    # container runtime needed; valkey comes from the pinned conda-forge closure.
+    name: bazel test (ubuntu-latest, hermetic)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bazel-contrib/setup-bazel@0.15.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-hermetic
+          repository-cache: true
+
+      - name: Verify NO host valkey-server on PATH
+        run: |
+          if command -v valkey-server >/dev/null 2>&1; then
+            echo "FAIL: valkey-server found at $(command -v valkey-server); the hermetic toolchain test would be meaningless" >&2
+            exit 1
+          fi
+
+      # `bazel build //...` would download every platform's conda closure
+      # (the per-platform toolchain targets); target paths instead.
+      # Building the smoke also builds its configured manifest and checks its config.
+      - name: bazel build
+        run: bazel build //:defs //private/... //toolchain:current //tests/... //tests/install_smoke:smoke_test
+
+      - name: bazel test
+        run: bazel test //tests/... --test_output=errors
+
+      - name: Chart manifest is up to date
+        run: |
+          set -euo pipefail
+          bazel run //tools:render_writeback_0_12_1
+          git diff --exit-code private/manifests/valkey.yaml
+
+      - name: No valkey processes left behind
+        if: always()
+        run: |
+          if pgrep -x valkey-server; then echo "FAIL: valkey-server processes left running" >&2; exit 1; fi
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bazel-testlogs-hermetic
+          path: bazel-testlogs/
+          if-no-files-found: ignore
+
+  install_smoke:
+    # kind + valkey_install(config) in namespace `cache`; config, writes
+    # and the Service checked from the pod and a second pod.
+    name: install smoke (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bazel-contrib/setup-bazel@0.15.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-install-smoke
+          repository-cache: true
+
+      - name: Verify Docker is available
+        run: docker version
+
+      - name: bazel test //tests/install_smoke:smoke_test
+        run: bazel test //tests/install_smoke:smoke_test --test_output=streamed --test_timeout=900
+
+      - name: No kind clusters left behind
+        if: always()
+        run: |
+          # rules_kind deletes its cluster even when the test fails.
+          left=$(docker ps -a --filter label=io.x-k8s.kind.cluster --format '{{.Names}}')
+          if [[ -n "$left" ]]; then echo "FAIL: kind node containers left: $left" >&2; exit 1; fi
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bazel-testlogs-install-smoke
+          path: bazel-testlogs/
+          if-no-files-found: ignore

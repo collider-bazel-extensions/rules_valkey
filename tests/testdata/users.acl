@@ -1,0 +1,3 @@
+user default on nopass ~* &* +@all
+user app on >app-secret ~app:* resetchannels +@read +@write -@dangerous
+user reader on >reader-secret ~* resetchannels +@read
