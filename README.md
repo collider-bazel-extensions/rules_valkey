@@ -43,6 +43,17 @@ use_repo(
 )
 ```
 
+To pin by archive and integrity instead of a git tag, replace the first `git_override` with:
+
+```python
+archive_override(
+    module_name = "rules_valkey",
+    urls = ["https://github.com/collider-bazel-extensions/rules_valkey/archive/refs/tags/v0.1.0.tar.gz"],
+    strip_prefix = "rules_valkey-0.1.0",
+    integrity = "sha256-",
+)
+```
+
 The `valkey` extension only honours the root module's `version` tags (the `mod.is_root` guard used across this organization), so declare it in your own `MODULE.bazel`. rules_valkey registers the toolchains itself.
 
 ## Config
