@@ -5,7 +5,7 @@ Bazel rules for [Valkey](https://valkey.io), the open-source key-value store tha
 - **Config (build time)**
   - `valkey_config` — a `valkey.conf`, plus an optional ACL file. valkey-server itself loads it as a validation action, so an unknown directive, a bad value or a broken ACL rule fails `bazel build` with Valkey's own message.
 - **Hermetic server (test time)**
-  - `valkey_server` — a long-running valkey-server on a free port, or with `shards` a Valkey Cluster. It optionally runs seed commands, loads a `dump.rdb` and requires a password, then writes `$TEST_TMPDIR/<name>.env` once ready.
+  - `valkey_server` — a long-running valkey-server on a free port, or with `shards` a Valkey Cluster. It optionally runs seed commands, loads a `dump.rdb`, requires a password and serves TLS only, then writes `$TEST_TMPDIR/<name>.env` once ready. It can be stopped and started again mid-test.
   - `valkey_health_check` — pairs with `valkey_server` for `itest_service`.
   - `valkey_test` — `sh_test` macro with an auto-launched server and `vk` helpers.
 - **Cluster install (kind / production-shaped)**
@@ -17,11 +17,11 @@ No host `valkey-server` or compiler needed. The binaries come from a pinned, SHA
 ## Install (Bzlmod)
 
 ```python
-bazel_dep(name = "rules_valkey", version = "0.1.0")
+bazel_dep(name = "rules_valkey", version = "0.2.0")
 git_override(
     module_name = "rules_valkey",
     remote = "https://github.com/collider-bazel-extensions/rules_valkey",
-    tag = "v0.1.0",
+    tag = "v0.2.0",
 )
 
 # rules_valkey depends on rules_kubectl, which isn't in the BCR either.
@@ -129,18 +129,25 @@ What the test sees:
 | Variable | |
 |---|---|
 | `VALKEY_HOST`, `VALKEY_PORT` | the server; in a cluster, the first primary |
-| `VALKEY_URL` | `redis://[:password@]127.0.0.1:<port>` (Redis and Valkey clients accept it) |
-| `VALKEY_SOCKET` | unix socket (standalone only) |
+| `VALKEY_URL` | `redis://[:password@]127.0.0.1:<port>`, or `rediss://…` with `tls` (Redis and Valkey clients accept it) |
+| `VALKEY_SOCKET` | unix socket (standalone, without `tls`) |
 | `VALKEY_CLUSTER_NODES` | `127.0.0.1:<p1>,127.0.0.1:<p2>,…` (cluster only; every node) |
 | `VALKEY_PASSWORD`, `VALKEYCLI_AUTH` | with `password` (valkey-cli reads `VALKEYCLI_AUTH`) |
+| `VALKEY_TLS`, `VALKEY_TLS_CA` | with `tls`: `1`, and the CA to trust |
+| `VALKEY_TLS_CERT`, `VALKEY_TLS_KEY` | with `tls_auth_clients`: the client certificate and key |
+| `VALKEY_CONTROL_URL` | the launcher's control endpoint (`valkey_stop` / `valkey_start`) |
+| `VALKEY_LOG` | the (first) server's log |
 | `VALKEY_CLI`, `VALKEY_SERVER` | the binaries; `valkey-cli` is also on `PATH` |
 | `VALKEY_TESTLIB` | shell helpers (below) |
 
 | Helper | |
 |---|---|
-| `vk ARGS…` | `valkey-cli` against the server, raw output; follows redirects in a cluster |
+| `vk ARGS…` | `valkey-cli` against the server, raw output; follows redirects in a cluster; uses TLS (and the client certificate) when the server does |
+| `vk_opts` | the `valkey-cli` connection options `vk` uses, one per line (host, port, TLS) |
 | `vk_wait EXPECTED ARGS…` | waits until `vk ARGS` prints `EXPECTED` (`$VK_WAIT_TIMEOUT`, default 30 s) |
 | `vk_flush` | `FLUSHALL` on every primary |
+| `valkey_stop [NODE]` | stops the server, or one cluster node (index into `VALKEY_CLUSTER_NODES`; default every node) |
+| `valkey_start [NODE]` | starts it again **on the same port(s)**, with the same password, TLS and data directory; waits until it answers (and, in a cluster, `cluster_state:ok`) |
 
 | `valkey_test` / `valkey_server` argument | Default | |
 |---|---|---|
@@ -152,6 +159,10 @@ What the test sees:
 | `replicas` | `0` | replicas per primary (cluster only) |
 | `ready_timeout` | `30` | seconds to wait for the server or cluster |
 | `extra_args` | `[]` | extra valkey-server options, e.g. `["--maxmemory", "32mb"]` |
+| `tls` | `False` | TLS only on the chosen port (cluster bus and replication over TLS too) |
+| `tls_auth_clients` | `False` | require client certificates (mutual TLS) |
+| `tls_cert`, `tls_key`, `tls_ca` | generated | your own server certificate (for `127.0.0.1`), key and CA; all three or none |
+| `tls_client_cert`, `tls_client_key` | generated | your own client certificate, needed with `tls_auth_clients` and your own CA |
 | `args`, `env`, `data`, `deps`, `size`, `timeout`, `tags`, … | | as for `sh_test` (`valkey_test` only) |
 
 **Readiness.** The server counts as ready when:
@@ -161,7 +172,37 @@ What the test sees:
 
 A standalone server is ready in about 0.2 s, a 3-shard cluster in about 2 s.
 
-**Failures.** The test fails, names the cause and shows the server's log if the server refuses its config, exits, or isn't ready within `ready_timeout`, or if a seed command fails. The test body never runs. Each test gets its own server(s), with their own ports and data, so tests are safe under `--jobs=N`. The servers are stopped when the test ends.
+**Failures.** The test fails, names the cause and shows the server's log if the server refuses its config, exits, or isn't ready within `ready_timeout`, or if a seed command fails. The test body never runs.
+
+If the server exits **while the test runs**, other than through `valkey_stop`, the test is stopped at once, with everything it started. It fails with the server's exit status and the end of its log:
+
+```
+valkey_test: the Valkey server exited (status 0) while the test was running; the test was stopped.
+valkey_test: last lines of …/valkey.log:
+  … User requested shutdown...
+```
+
+Each test gets its own server(s), with their own ports and data, so tests are safe under `--jobs=N`. The servers are stopped when the test ends.
+
+**Stopping and starting the server.** `valkey_stop` and `valkey_start` exercise clients that must fail closed while the server is down and recover when it returns:
+
+```sh
+source "$VALKEY_TESTLIB"
+valkey_stop
+! ./my_client get key              # must fail, not hang or serve stale data
+valkey_start                       # same port, password, TLS and data dir
+[[ "$(./my_client get key)" == v ]]
+```
+
+- **What comes back:** `valkey_stop` is a SIGTERM, which Valkey handles like `SHUTDOWN`. With Valkey's default save points it writes an RDB first, and with `appendonly yes` the AOF is fsynced. So the data comes back. With no persistence (`save ""`, `appendonly no` in your config), the restarted server is **empty**.
+- **Clusters:** `valkey_stop 1` / `valkey_start 1` restart one node, which rejoins with its `nodes.conf`. With no argument, every node is restarted.
+- **A taken port:** if another process has taken the port meanwhile, `valkey_start` retries 5 times, 0.2 s apart. It then fails with `valkey_start: 500: … another process holds port <port> (Address already in use)`, and the server can be started again later.
+- **From other languages:** `POST $VALKEY_CONTROL_URL/stop` and `/start`, with an optional `?node=N`.
+
+**TLS.** `tls = True` makes the server TLS-only: plaintext connections to its port are refused, and there's no unix socket.
+- **Certificates:** without your own, a throwaway CA and certificates (server for `127.0.0.1` / `localhost`, and a client) are made at start. They use the `openssl` from the toolchain's conda closure, so nothing comes from the host.
+- **Clients:** `vk` uses them automatically. Other clients take `VALKEY_TLS_CA`, plus `VALKEY_TLS_CERT` / `VALKEY_TLS_KEY` with `tls_auth_clients`. `VALKEY_URL` is `rediss://`.
+- **Clusters:** these use TLS for the cluster bus and replication too.
 
 ### `valkey_server` + `valkey_health_check` (rules_itest)
 

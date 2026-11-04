@@ -37,5 +37,5 @@ exec python3 "$launcher" serve \
   --env-file "$tmp/$name.env" \
   --state-dir "$tmp/valkey-$name" \
   --ready-timeout '__READY_TIMEOUT__' \
-  "${opts[@]}" __OPTS__ \
+  ${opts[@]+"${opts[@]}"} __OPTS__ \
   -- __EXTRA_ARGS__ "$@"

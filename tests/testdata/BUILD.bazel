@@ -24,3 +24,32 @@ valkey_config(
     name = "install_config",
     src = ":install_conf",
 )
+
+# Persistence variants for restart tests.
+valkey_config(
+    name = "no_persistence",
+    src = "no_persistence.conf",
+)
+
+valkey_config(
+    name = "aof",
+    src = "aof.conf",
+)
+
+# Your-own-certificates TLS fixtures, made at build time with the
+# toolchain's openssl (valid 10 years: build outputs are cached).
+genrule(
+    name = "certs",
+    outs = [
+        "certs/ca.crt",
+        "certs/server.crt",
+        "certs/server.key",
+        "certs/client.crt",
+        "certs/client.key",
+    ],
+    cmd = "$(location //tests:make_certs.sh) $(@D)/certs $(locations //toolchain:current)",
+    tools = [
+        "//tests:make_certs.sh",
+        "//toolchain:current",
+    ],
+)

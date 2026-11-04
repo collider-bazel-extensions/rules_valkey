@@ -39,6 +39,7 @@ time is an error that names the cause and prints the server's log.
 """
 
 import argparse
+import errno
 import os
 import shlex
 import shutil
@@ -49,6 +50,7 @@ import sys
 import tempfile
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _READY = "Ready to accept connections"
 
@@ -136,10 +138,21 @@ def _host_overrides(workdir):
             "--supervised", "no", "--cluster-config-file", "nodes.conf"]
 
 
-def _ping(port, password):
+def _tls_context(tls):
+    """An ssl context that trusts the test CA (and presents the client
+    certificate, when there is one)."""
+    import ssl
+    ctx = ssl.create_default_context(cafile=tls["ca"])
+    if tls.get("client_cert"):
+        ctx.load_cert_chain(tls["client_cert"], tls["client_key"])
+    return ctx
+
+
+def _ping(port, password, tls=None):
     """True once the server answers PING (not -LOADING)."""
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=1) as s:
+        with socket.create_connection(("127.0.0.1", port), timeout=1) as raw:
+            s = _tls_context(tls).wrap_socket(raw, server_hostname="127.0.0.1") if tls else raw
             cmd = b""
             if password:
                 pw = password.encode()
@@ -161,18 +174,31 @@ def _ping(port, password):
         return False
 
 
-def _start_one(server, args, log_path, port, password, deadline, procs):
-    with open(log_path, "w") as log:
+def _read_from(path, offset):
+    """The log from byte `offset` on (a restart appends to it)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return "(no log)"
+
+
+def _start_one(server, args, log_path, port, password, deadline, procs, tls=None, append=False):
+    """Start one valkey-server and wait until it logs ready and answers
+    PING. Returns (proc, ready, the log written by this start)."""
+    with open(log_path, "a" if append else "w") as log:
+        offset = os.path.getsize(log_path)
         proc = subprocess.Popen([server] + args, stdout=log, stderr=subprocess.STDOUT,
                                 stdin=subprocess.DEVNULL, env=_env())
     procs.append(proc)
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            return proc, False
-        if _READY in _read(log_path) and (port is None or _ping(port, password)):
-            return proc, True
+            return proc, False, _read_from(log_path, offset)
+        if _READY in _read_from(log_path, offset) and (port is None or _ping(port, password, tls)):
+            return proc, True, _read_from(log_path, offset)
         time.sleep(0.05)
-    return proc, False
+    return proc, False, _read_from(log_path, offset)
 
 
 def _stop(procs):
@@ -199,10 +225,9 @@ def check(args):
         if args.acl:
             cmd += ["--aclfile", os.path.abspath(args.acl)]
         log_path = os.path.join(work, "log")
-        proc, ready = _start_one(args.server, cmd, log_path, None, None,
-                                 time.monotonic() + args.ready_timeout, procs)
+        proc, ready, out = _start_one(args.server, cmd, log_path, None, None,
+                                      time.monotonic() + args.ready_timeout, procs)
         if not ready:
-            out = _read(log_path)
             why = ("valkey-server refused it" if proc.poll() is not None
                    else f"valkey-server was not ready within {args.ready_timeout:g}s")
             print(f"valkey_config: {args.config}: {why}:\n{_explain(out)}", file=sys.stderr)
@@ -225,10 +250,73 @@ def _explain(log):
     return "\n".join("  " + x for x in (errs or lines[-10:]))
 
 
+# ---- TLS -------------------------------------------------------------------------
+
+# Without one, the closure's openssl looks for a config at its build-time
+# prefix and fails.
+_OPENSSL_CNF = "[req]\ndistinguished_name = dn\n[dn]\n"
+
+
+def _openssl(args, tls_dir, *argv):
+    env = dict(os.environ, OPENSSL_CONF=os.path.join(tls_dir, "openssl.cnf"))
+    r = subprocess.run([args.openssl] + list(argv), cwd=tls_dir, env=env,
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise Failed(f"openssl {argv[0]} failed making the test certificates:\n{r.stderr}")
+
+
+def make_certs(args):
+    """A throwaway CA, a server certificate for 127.0.0.1 / localhost and a
+    client certificate, in <state-dir>/tls."""
+    d = os.path.join(args.state_dir, "tls")
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d)
+    with open(os.path.join(d, "openssl.cnf"), "w") as f:
+        f.write(_OPENSSL_CNF)
+    _openssl(args, d, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+             "-subj", "/CN=rules_valkey test CA", "-keyout", "ca.key", "-out", "ca.crt",
+             "-addext", "basicConstraints=critical,CA:TRUE",
+             "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+             "-addext", "subjectKeyIdentifier=hash")
+    for name, usage, san in (("server", "serverAuth,clientAuth",
+                              "subjectAltName=IP:127.0.0.1,DNS:localhost\n"),
+                             ("client", "clientAuth", "")):
+        with open(os.path.join(d, name + ".ext"), "w") as f:
+            f.write("basicConstraints=critical,CA:FALSE\n"
+                    "keyUsage=critical,digitalSignature,keyEncipherment\n"
+                    f"extendedKeyUsage={usage}\n"
+                    "subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n" + san)
+        _openssl(args, d, "req", "-newkey", "rsa:2048", "-nodes", "-subj", f"/CN=rules_valkey {name}",
+                 "-keyout", name + ".key", "-out", name + ".csr")
+        _openssl(args, d, "x509", "-req", "-in", name + ".csr", "-CA", "ca.crt", "-CAkey", "ca.key",
+                 "-CAcreateserial", "-days", "2", "-extfile", name + ".ext", "-out", name + ".crt")
+    return {"ca": os.path.join(d, "ca.crt"),
+            "cert": os.path.join(d, "server.crt"), "key": os.path.join(d, "server.key"),
+            "client_cert": os.path.join(d, "client.crt"),
+            "client_key": os.path.join(d, "client.key")}
+
+
+def tls_files(args):
+    """None, or the CA / server / client certificate paths for --tls."""
+    if not args.tls:
+        return None
+    if args.tls_cert:
+        t = {"ca": args.tls_ca, "cert": args.tls_cert, "key": args.tls_key}
+        if args.tls_client_cert:
+            t.update(client_cert=args.tls_client_cert, client_key=args.tls_client_key)
+        return {k: os.path.abspath(v) for k, v in t.items()}
+    return make_certs(args)
+
+
 # ---- serve ---------------------------------------------------------------------
 
 def _cli(args, port, extra, stdin=None, cluster=False):
     cmd = [args.cli, "-h", "127.0.0.1", "-p", str(port), "--no-raw"]
+    if args.tls_paths:
+        t = args.tls_paths
+        cmd += ["--tls", "--cacert", t["ca"]]
+        if t.get("client_cert"):
+            cmd += ["--cert", t["client_cert"], "--key", t["client_key"]]
     if cluster:
         cmd.append("-c")
     env = _env()
@@ -241,7 +329,21 @@ def _server_args(args, workdir, port, sock=None):
     a = []
     if args.config:
         a.append(stage_config(args.config, workdir))
-    a += ["--port", str(port), "--bind", "127.0.0.1"] + _host_overrides(workdir)
+    t = args.tls_paths
+    if t:
+        # TLS only: no plaintext TCP listener.
+        a += ["--port", "0", "--tls-port", str(port),
+              "--tls-cert-file", t["cert"], "--tls-key-file", t["key"],
+              "--tls-ca-cert-file", t["ca"],
+              "--tls-auth-clients", "yes" if args.tls_auth_clients else "no"]
+        if t.get("client_cert"):
+            a += ["--tls-client-cert-file", t["client_cert"],
+                  "--tls-client-key-file", t["client_key"]]
+        if args.shards:
+            a += ["--tls-cluster", "yes", "--tls-replication", "yes"]
+    else:
+        a += ["--port", str(port)]
+    a += ["--bind", "127.0.0.1"] + _host_overrides(workdir)
     if sock:
         a += ["--unixsocket", sock, "--unixsocketperm", "700"]
     if args.acl:
@@ -253,18 +355,27 @@ def _server_args(args, workdir, port, sock=None):
     return a
 
 
+class Node:
+    """One valkey-server: its ports, arguments and log, restartable."""
+
+    def __init__(self, index, port, bus, workdir, argv, log):
+        self.index, self.port, self.bus = index, port, bus
+        self.workdir, self.argv, self.log = workdir, argv, log
+        self.proc = None
+        self.stopped = False   # stopped on request (not a crash)
+
+
 def start(args, procs, sock_dir):
-    """Start the server(s). Returns (ports, socket or None, log paths)."""
+    """Start the server(s). Returns (nodes, socket or None)."""
     deadline = time.monotonic() + args.ready_timeout
-    nodes = args.shards * (1 + args.replicas) if args.shards else 1
-    for attempt in range(1, 6):
-        ports = _free_ports(nodes * 2)
-        client, bus = ports[:nodes], ports[nodes:]
-        sock = os.path.join(sock_dir, "valkey.sock") if not args.shards else None
-        logs = []
-        started = []
-        clash = False
-        for i in range(nodes):
+    count = args.shards * (1 + args.replicas) if args.shards else 1
+    for attempt in range(1, _ATTEMPTS + 1):
+        ports = _free_ports(count * 2)
+        client, bus = ports[:count], ports[count:]
+        sock = (os.path.join(sock_dir, "valkey.sock")
+                if not args.shards and not args.tls_paths else None)
+        nodes, started, clash = [], [], False
+        for i in range(count):
             workdir = os.path.join(args.state_dir, f"node{i}" if args.shards else "data")
             shutil.rmtree(workdir, ignore_errors=True)
             os.makedirs(workdir)
@@ -277,18 +388,19 @@ def start(args, procs, sock_dir):
                 a += ["--cluster-enabled", "yes", "--cluster-port", str(bus[i])]
             a += args.extra
             log_path = os.path.join(args.state_dir, f"node{i}.log" if args.shards else "valkey.log")
-            logs.append(log_path)
-            proc, ready = _start_one(args.server, a, log_path, client[i], args.password,
-                                     deadline, procs)
+            node = Node(i, client[i], bus[i] if args.shards else None, workdir, a, log_path)
+            proc, ready, out = _start_one(args.server, a, log_path, client[i], args.password,
+                                          deadline, procs, args.tls_paths)
+            node.proc = proc
+            nodes.append(node)
             started.append(proc)
             if not ready:
-                out = _read(log_path)
                 if proc.poll() is None:
                     _stop(started)
                     raise Failed(f"valkey-server was not ready within {args.ready_timeout:g}s "
                                  f"on port {client[i]}. Log:\n{out}")
                 _stop(started)
-                if "Address already in use" in out and attempt < 5:
+                if "Address already in use" in out and attempt < _ATTEMPTS:
                     _log(f"a port was taken (attempt {attempt}); retrying")
                     clash = True
                     break
@@ -299,8 +411,8 @@ def start(args, procs, sock_dir):
             continue
         if args.shards:
             _create_cluster(args, client, deadline)
-        return client, sock, logs
-    raise Failed("valkey-server could not get free ports after 5 attempts")
+        return nodes, sock
+    raise Failed(f"valkey-server could not get free ports after {_ATTEMPTS} attempts")
 
 
 def _create_cluster(args, ports, deadline):
@@ -309,6 +421,10 @@ def _create_cluster(args, ports, deadline):
              ["--cluster-replicas", str(args.replicas), "--cluster-yes"])
     if r.returncode != 0:
         raise Failed(f"`valkey-cli --cluster create` failed:\n{r.stdout}{r.stderr}")
+    _wait_cluster(args, ports, deadline)
+
+
+def _wait_cluster(args, ports, deadline):
     while True:
         states = []
         for p in ports:
@@ -343,6 +459,155 @@ def write_env(env_file, values):
     os.replace(tmp, env_file)
 
 
+# ---- restarts ------------------------------------------------------------------
+
+# Start attempts: new free ports each time on a first start; the same
+# ports, _RETRY_DELAY apart, on a restart.
+_ATTEMPTS = 5
+_RETRY_DELAY = 0.2
+
+
+def _bindable(port):
+    """Whether valkey-server could listen on 127.0.0.1:port again (it sets
+    SO_REUSEADDR too, so TIME_WAIT connections don't count)."""
+    s = socket.socket()
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", port))
+        return True
+    except OSError as e:
+        if e.errno == errno.EADDRINUSE:
+            return False
+        raise
+    finally:
+        s.close()
+
+
+def _taken(node):
+    ports = [("port", node.port)] + ([("cluster bus port", node.bus)] if node.bus else [])
+    return [f"{name} {p}" for name, p in ports if not _bindable(p)]
+
+
+def _which(args, node):
+    return f" (node {node.index})" if args.shards else ""
+
+
+def restart(args, node, procs):
+    """Start a stopped node again with the same arguments (ports, data dir,
+    password, TLS). Raises Failed naming a port another process holds."""
+    taken = []
+    for attempt in range(1, _ATTEMPTS + 1):
+        if attempt > 1:
+            time.sleep(_RETRY_DELAY)
+        taken = _taken(node)
+        if taken:
+            _log(f"valkey-server{_which(args, node)}: taken: {', '.join(taken)} (attempt {attempt})")
+            continue
+        deadline = time.monotonic() + args.ready_timeout
+        proc, ready, out = _start_one(args.server, node.argv, node.log, node.port, args.password,
+                                      deadline, procs, args.tls_paths, append=True)
+        node.proc = proc
+        if ready:
+            node.stopped = False
+            return
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        if "Address already in use" in out:
+            taken = _taken(node) or ["a port"]
+            _log(f"valkey-server{_which(args, node)}: a port was taken while starting (attempt {attempt})")
+            continue
+        raise Failed(f"valkey-server{_which(args, node)} did not start again: "
+                     f"{'not ready in time' if proc.returncode is None else f'exit {proc.returncode}'}"
+                     f":\n{_explain(out)}")
+    raise Failed(f"valkey-server{_which(args, node)} could not listen on its ports again after "
+                 f"{_ATTEMPTS} attempts {_RETRY_DELAY:g}s apart: another process holds "
+                 f"{', '.join(taken)} (Address already in use)")
+
+
+def stop_node(node):
+    """SIGTERM, as `SHUTDOWN` would: valkey-server saves an RDB first when
+    save points are configured (its default), and AOF is fsynced."""
+    node.stopped = True
+    p = node.proc
+    if p is not None and p.poll() is None:
+        p.terminate()
+        try:
+            p.wait(30)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+
+
+class Control:
+    """POST /stop, /start (optionally ?node=N; default every node)."""
+
+    def __init__(self, args, nodes, procs, stopping):
+        self.args, self.nodes, self.procs, self.stopping = args, nodes, procs, stopping
+        self.lock = threading.Lock()
+
+    def _select(self, query):
+        if "node" not in query:
+            return self.nodes
+        try:
+            i = int(query["node"])
+            return [self.nodes[i]]
+        except (ValueError, IndexError):
+            raise LookupError(f"no node {query['node']!r} (0..{len(self.nodes) - 1})")
+
+    def handle(self, path):
+        from urllib.parse import parse_qsl, urlsplit
+        u = urlsplit(path)
+        if self.stopping:
+            return 503, "shutting down"
+        try:
+            nodes = self._select(dict(parse_qsl(u.query)))
+        except LookupError as e:
+            return 400, str(e)
+        with self.lock:
+            if u.path == "/stop":
+                for n in nodes:
+                    stop_node(n)
+                _log(f"stopped node(s) {', '.join(str(n.index) for n in nodes)} (control)")
+                return 200, "stopped"
+            if u.path == "/start":
+                try:
+                    for n in nodes:
+                        if n.proc is None or n.proc.poll() is not None:
+                            restart(self.args, n, self.procs)
+                    if self.args.shards and not any(n.stopped for n in self.nodes):
+                        _wait_cluster(self.args, [n.port for n in self.nodes],
+                                      time.monotonic() + self.args.ready_timeout)
+                except Failed as e:
+                    _log(str(e))
+                    return 500, str(e)
+                _log(f"started node(s) {', '.join(str(n.index) for n in nodes)} again (control)")
+                return 200, "started"
+        return 404, f"unknown control path {u.path}"
+
+    def serve(self):
+        control = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                status, text = control.handle(self.path)
+                body = (text + "\n").encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+
 def serve(args):
     if args.shards and args.shards < 3:
         _log(f"--shards {args.shards}: a Valkey cluster needs at least 3 primaries")
@@ -357,8 +622,8 @@ def serve(args):
         pass
 
     # Installed before the servers start, so a signal during start-up
-    # still stops them. Once ready, the handler only asks them to stop: the
-    # main thread is blocked in proc.wait(), which holds Popen's wait lock.
+    # still stops them. Once ready, the handler only asks them to stop and
+    # the main loop (polling) notices.
     procs, stopping, ready = [], [], []
 
     def _on_signal(signum, _frame):
@@ -381,8 +646,9 @@ def serve(args):
     sock_dir = _short_dir()
     try:
         try:
-            ports, sock, logs = start(args, procs, sock_dir)
-            seed(args, ports[0])
+            args.tls_paths = tls_files(args)
+            nodes, sock = start(args, procs, sock_dir)
+            seed(args, nodes[0].port)
         except Failed as e:
             _log(str(e))
             _stop(procs)
@@ -391,39 +657,54 @@ def serve(args):
             _stop(procs)
             raise
 
+        control = Control(args, nodes, procs, stopping)
+        httpd = control.serve()
+        port = nodes[0].port
         auth = f":{args.password}@" if args.password else ""
+        scheme = "rediss" if args.tls_paths else "redis"
         values = {
             "VALKEY_HOST": "127.0.0.1",
-            "VALKEY_PORT": ports[0],
-            "VALKEY_URL": f"redis://{auth}127.0.0.1:{ports[0]}",
+            "VALKEY_PORT": port,
+            "VALKEY_URL": f"{scheme}://{auth}127.0.0.1:{port}",
         }
         if sock:
             values["VALKEY_SOCKET"] = sock
         if args.shards:
-            values["VALKEY_CLUSTER_NODES"] = ",".join(f"127.0.0.1:{p}" for p in ports)
+            values["VALKEY_CLUSTER_NODES"] = ",".join(f"127.0.0.1:{n.port}" for n in nodes)
         if args.password:
             values["VALKEY_PASSWORD"] = args.password
             values["VALKEYCLI_AUTH"] = args.password
+        t = args.tls_paths
+        if t:
+            values["VALKEY_TLS"] = "1"
+            values["VALKEY_TLS_CA"] = t["ca"]
+            if args.tls_auth_clients and t.get("client_cert"):
+                values["VALKEY_TLS_CERT"] = t["client_cert"]
+                values["VALKEY_TLS_KEY"] = t["client_key"]
+        values["VALKEY_CONTROL_URL"] = f"http://127.0.0.1:{httpd.server_address[1]}"
+        values["VALKEY_LOG"] = nodes[0].log
         values["VALKEY_CLI"] = os.path.abspath(args.cli)
         values["VALKEY_SERVER"] = os.path.abspath(args.server)
         write_env(args.env_file, values)
         ready.append(True)
-        _log(f"ready on 127.0.0.1:{ports[0]}"
-             + (f" ({len(ports)}-node cluster)" if args.shards else "")
+        _log(f"ready on 127.0.0.1:{port}"
+             + (" (TLS)" if t else "")
+             + (f" ({len(nodes)}-node cluster)" if args.shards else "")
              + f"; env file {args.env_file}")
 
-        # Wait for the first server to exit; then stop the rest.
-        done = None
-        while done is None:
-            for p in procs:
-                if p.poll() is not None:
-                    done = p
-                    break
-            else:
-                try:
-                    procs[0].wait(0.2)
-                except subprocess.TimeoutExpired:
-                    pass
+        # Run until signalled, or until a server exits without being
+        # asked to (valkey_stop leaves the launcher running).
+        crashed = None
+        while not stopping and crashed is None:
+            for n in nodes:
+                p = n.proc
+                if p is not None and p.poll() is not None and not n.stopped:
+                    with control.lock:  # not mid-restart
+                        if n.proc is p and not n.stopped:
+                            crashed = n
+                            break
+            time.sleep(0.1)
+        httpd.shutdown()
         _stop(procs)
         try:
             os.remove(args.env_file)
@@ -431,9 +712,10 @@ def serve(args):
             pass
         if stopping:
             return 0
-        i = procs.index(done)
-        _log(f"valkey-server exited with status {done.returncode}. Log:\n{_read(logs[i])}")
-        return done.returncode or 1
+        rc = crashed.proc.returncode
+        _log(f"valkey-server{f' (node {crashed.index})' if args.shards else ''} exited with "
+             f"status {rc}. Log:\n{_read(crashed.log)}")
+        return rc if rc and rc > 0 else 1
     finally:
         shutil.rmtree(sock_dir, ignore_errors=True)
 
@@ -462,6 +744,14 @@ def main(argv):
     s.add_argument("--seed", action="append", default=[])
     s.add_argument("--shards", type=int, default=0)
     s.add_argument("--replicas", type=int, default=0)
+    s.add_argument("--tls", action="store_true")
+    s.add_argument("--tls-auth-clients", action="store_true")
+    s.add_argument("--tls-cert")
+    s.add_argument("--tls-key")
+    s.add_argument("--tls-ca")
+    s.add_argument("--tls-client-cert")
+    s.add_argument("--tls-client-key")
+    s.add_argument("--openssl")
     s.add_argument("extra", nargs="*")
 
     st = sub.add_parser("stage-for-chart")

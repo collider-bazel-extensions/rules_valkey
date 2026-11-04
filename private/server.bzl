@@ -59,6 +59,18 @@ def _valkey_server_impl(ctx):
         fail("{}: rdb is for a standalone server; seed a cluster with `seed`.".format(ctx.label))
     if "\n" in ctx.attr.password:
         fail("{}: password must be one line.".format(ctx.label))
+    tls_given = [a for a in ("tls_cert", "tls_key", "tls_ca") if getattr(ctx.file, a)]
+    client_given = [a for a in ("tls_client_cert", "tls_client_key") if getattr(ctx.file, a)]
+    if (tls_given or client_given or ctx.attr.tls_auth_clients) and not ctx.attr.tls:
+        fail("{}: {} need tls = True.".format(
+            ctx.label, ", ".join(tls_given + client_given + (["tls_auth_clients"] if ctx.attr.tls_auth_clients else []))))
+    if tls_given and len(tls_given) != 3:
+        fail("{}: give tls_cert, tls_key and tls_ca together (or none: generated).".format(ctx.label))
+    if client_given and (len(client_given) != 2 or not tls_given):
+        fail("{}: tls_client_cert and tls_client_key go together, with tls_cert/tls_key/tls_ca.".format(ctx.label))
+    if tls_given and ctx.attr.tls_auth_clients and not client_given:
+        fail("{}: tls_auth_clients with your own certificates needs tls_client_cert and " +
+             "tls_client_key (signed by tls_ca) for the launcher and the test.".format(ctx.label))
 
     lines = []
     files = []
@@ -75,7 +87,18 @@ def _valkey_server_impl(ctx):
     for f in ctx.files.seed:
         lines.append(_resolved("--seed", f.short_path))
         files.append(f)
+    for a in ("tls_cert", "tls_key", "tls_ca", "tls_client_cert", "tls_client_key"):
+        f = getattr(ctx.file, a)
+        if f:
+            lines.append(_resolved("--" + a.replace("_", "-"), f.short_path))
+            files.append(f)
+    if ctx.attr.tls:
+        lines.append(_resolved("--openssl", vk.openssl.short_path))
     opts = []
+    if ctx.attr.tls:
+        opts.append("--tls")
+    if ctx.attr.tls_auth_clients:
+        opts.append("--tls-auth-clients")
     if ctx.attr.password:
         opts += ["--password", ctx.attr.password]
     if shards:
@@ -149,6 +172,21 @@ naming the cause.
         "extra_args": attr.string_list(
             doc = "Extra valkey-server options, e.g. [\"--maxmemory\", \"64mb\"].",
         ),
+        "tls": attr.bool(
+            doc = "Listen TLS-only on the chosen port (cluster bus and " +
+                  "replication over TLS too). Without tls_cert/tls_key/tls_ca, " +
+                  "a throwaway CA and certificates are made at start with the " +
+                  "toolchain's openssl. Env: VALKEY_TLS=1, VALKEY_TLS_CA, rediss:// URL.",
+        ),
+        "tls_auth_clients": attr.bool(
+            doc = "Require client certificates (mutual TLS). Exports " +
+                  "VALKEY_TLS_CERT / VALKEY_TLS_KEY for the test.",
+        ),
+        "tls_cert": attr.label(allow_single_file = True, doc = "Server certificate (for 127.0.0.1)."),
+        "tls_key": attr.label(allow_single_file = True, doc = "Server key."),
+        "tls_ca": attr.label(allow_single_file = True, doc = "CA that signed the certificates."),
+        "tls_client_cert": attr.label(allow_single_file = True, doc = "Client certificate (with tls_auth_clients)."),
+        "tls_client_key": attr.label(allow_single_file = True, doc = "Client key."),
         "_launcher": attr.label(default = "//private:launcher.py", allow_single_file = True),
         "_tmpl": attr.label(default = "//private:server.sh.tmpl", allow_single_file = True),
     },

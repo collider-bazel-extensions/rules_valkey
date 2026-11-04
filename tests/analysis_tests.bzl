@@ -53,6 +53,17 @@ def analysis_test_suite(name):
     valkey_server(name = s + "_cluster_rdb", shards = 3, rdb = "//tests/testdata:dump.rdb", tags = ["manual"])
     valkey_server(name = s + "_bad_timeout", ready_timeout = "soon", tags = ["manual"])
     valkey_install(name = s + "_install_acl", config = "//tests/testdata:config", tags = ["manual"])
+    valkey_server(name = s + "_tls_no_tls", tls_auth_clients = True, tags = ["manual"])
+    valkey_server(name = s + "_tls_partial", tls = True, tls_cert = "//tests/testdata:certs/server.crt", tags = ["manual"])
+    valkey_server(
+        name = s + "_tls_mutual_own",
+        tls = True,
+        tls_auth_clients = True,
+        tls_ca = "//tests/testdata:certs/ca.crt",
+        tls_cert = "//tests/testdata:certs/server.crt",
+        tls_key = "//tests/testdata:certs/server.key",
+        tags = ["manual"],
+    )
 
     tests = {
         "_info": (_server_info_test, s + "_cluster", None),
@@ -65,6 +76,9 @@ def analysis_test_suite(name):
         "_cluster_rdb": (_fails_test, s + "_cluster_rdb", "rdb is for a standalone server"),
         "_timeout": (_fails_test, s + "_bad_timeout", "expected a positive number of seconds"),
         "_install_acl": (_fails_test, s + "_install_acl_manifest", "has an ACL file"),
+        "_tls_no_tls": (_fails_test, s + "_tls_no_tls", "tls_auth_clients need tls = True"),
+        "_tls_partial": (_fails_test, s + "_tls_partial", "give tls_cert, tls_key and tls_ca together"),
+        "_tls_mutual_own": (_fails_test, s + "_tls_mutual_own", "needs tls_client_cert and tls_client_key"),
     }
     for suffix, (rule, target, message) in tests.items():
         if message:

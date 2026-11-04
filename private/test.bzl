@@ -27,6 +27,13 @@ def valkey_test(
         replicas = 0,
         ready_timeout = 30,
         extra_args = None,
+        tls = False,
+        tls_auth_clients = False,
+        tls_cert = None,
+        tls_key = None,
+        tls_ca = None,
+        tls_client_cert = None,
+        tls_client_key = None,
         deps = None,
         data = None,
         args = None,
@@ -47,6 +54,13 @@ def valkey_test(
       replicas: replicas per primary in a cluster.
       ready_timeout: seconds to wait for the server.
       extra_args: extra valkey-server options.
+      tls: TLS-only server (generated test CA unless tls_cert/tls_key/tls_ca).
+      tls_auth_clients: require client certificates (mutual TLS).
+      tls_cert: server certificate (with tls_key, tls_ca).
+      tls_key: server key.
+      tls_ca: CA certificate.
+      tls_client_cert: client certificate (tls_auth_clients with your own CA).
+      tls_client_key: client key.
       deps: forwarded to the inner sh_binary.
       data: runfiles for the test (on the inner sh_binary and the
         sh_test, so `args` may use $(rootpath) on them).
@@ -68,6 +82,13 @@ def valkey_test(
         replicas = replicas,
         ready_timeout = str(ready_timeout),
         extra_args = extra_args or [],
+        tls = tls,
+        tls_auth_clients = tls_auth_clients,
+        tls_cert = tls_cert,
+        tls_key = tls_key,
+        tls_ca = tls_ca,
+        tls_client_cert = tls_client_cert,
+        tls_client_key = tls_client_key,
         tags = tags + ["manual"],
         testonly = True,
     )

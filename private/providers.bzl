@@ -8,6 +8,7 @@ ValkeyBinaryInfo = provider(
         "cli":       "File — valkey-cli",
         "check_rdb": "File — valkey-check-rdb",
         "check_aof": "File — valkey-check-aof",
+        "openssl":   "File — the closure's openssl CLI (test certificates)",
         "files":     "depset of File — the binaries plus the shared libraries " +
                      "they load through their RPATH; every runfiles tree " +
                      "that runs a binary needs all of it",
