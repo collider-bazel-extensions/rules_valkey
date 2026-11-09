@@ -38,9 +38,9 @@ To pin by archive and integrity instead of a git tag, replace the first `git_ove
 ```python
 archive_override(
     module_name = "rules_valkey",
-    urls = ["https://github.com/collider-bazel-extensions/rules_valkey/archive/refs/tags/v0.2.0.tar.gz"],
-    strip_prefix = "rules_valkey-0.2.0",
-    integrity = "sha256-U16odNNVgihapwb77C99y61V01cp7tvIajrc1EcmQ+s=",
+    urls = ["https://github.com/collider-bazel-extensions/rules_valkey/archive/refs/tags/v0.2.1.tar.gz"],
+    strip_prefix = "rules_valkey-0.2.1",
+    integrity = "sha256-9wDhYVGk3yzw/yf9AaCQaY2b7/6B+MhH+vRPuND/coo=",
 )
 ```
 
