@@ -86,6 +86,14 @@ Otherwise the test's own exit status is returned. Killing only the test's shell 
   The first kind smoke run caught this: the test config's `dir /var/lib/valkey` stopped the pod from starting. The build-time check hadn't seen it, because it neutralises host paths for itself.
 - **ACL files.** A config with an ACL file is refused for the install, because the pre-rendered chart mounts only `valkey.conf`.
 
+## Extension: no root tag needed (v0.2.1)
+
+The `valkey` extension runs once per build and sees every module's tags. It fetches the root module's versions plus rules_valkey's own, or `DEFAULT_VERSION` (`private/versions.bzl`) when neither sets one, and creates each `valkey_<ver>_<plat>` repo once. Repos are named by version, so tags from different modules cannot collide; other modules' tags are ignored. rules_valkey's own version is always fetched because its `MODULE.bazel` imports those repos and `toolchain/BUILD.bazel` points at them for every consumer. Through v0.2.0 the extension honoured only the root's tags (`mod.is_root`), so a root without `valkey.version()` failed to resolve. A version with no conda closure fails with a message naming `valkey.version`.
+
+## Release archive contents (v0.2.1)
+
+`tests/` and `tools/` are `export-ignore` (`.gitattributes`): they load the dev-only `rules_itest`, `rules_kind` and `rules_helm`, which made `@rules_valkey//...` unloadable for consumers. `REPO.bazel` `ignore_directories` would also hide them from this repo's own `bazel test`. The dev-only `use_extension("//tools:extensions.bzl", ...)` is skipped for a non-root module. CI's `consumer` job (`.github/consumer/check.sh`) checks, from the commit's `git archive`: an untagged root resolves and a `valkey_test` runs 9.1.3, a repeated tag resolves, an unsupported version fails clearly, and `@rules_valkey//...` loads.
+
 ## What this repo does not (yet) do
 
 - **Sentinel** and Valkey modules (`loadmodule`; conda-forge ships no modules).

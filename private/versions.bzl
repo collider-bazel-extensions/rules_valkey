@@ -1,6 +1,9 @@
 """Supported platforms. The binary pins themselves are the conda-forge
 closures in conda_versions.bzl (tools/update_conda_versions.py)."""
 
+# Fetched when neither the root module nor rules_valkey sets valkey.version().
+DEFAULT_VERSION = "9.1.3"
+
 PLATFORMS = {
     "linux_amd64":  ["@platforms//os:linux", "@platforms//cpu:x86_64"],
     "linux_arm64":  ["@platforms//os:linux", "@platforms//cpu:arm64"],
