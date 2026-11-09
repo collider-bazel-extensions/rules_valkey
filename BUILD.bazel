@@ -23,5 +23,5 @@ bzl_library(
 bzl_library(
     name = "extensions",
     srcs = ["extensions.bzl"],
-    deps = ["//private:repositories"],
+    deps = ["//private:conda_versions", "//private:repositories", "//private:versions"],
 )

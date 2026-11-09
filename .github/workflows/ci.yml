@@ -57,6 +57,22 @@ jobs:
           path: bazel-testlogs/
           if-no-files-found: ignore
 
+  consumer:
+    # rules_valkey as a dependency, from the commit's release archive: a root
+    # without valkey.version() resolves, repeated / unsupported versions, and
+    # @rules_valkey//... loads (tests/ and tools/ are export-ignore'd).
+    name: consumer (ubuntu-latest, git archive)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bazel-contrib/setup-bazel@0.15.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+
+      - name: Consumer checks
+        run: .github/consumer/check.sh "$RUNNER_TEMP/consumer"
+
   install_smoke:
     # kind + valkey_install(config) in namespace `cache`; config, writes
     # and the Service checked from the pod and a second pod.

@@ -23,7 +23,7 @@ Pinned: Valkey 9.1.3 (conda-forge valkey-server closure), valkey-io
 
 module(
     name = "rules_valkey",
-    version = "0.2.0",
+    version = "0.2.1",
 )
 
 bazel_dep(name = "bazel_skylib", version = "1.8.2")
@@ -34,8 +34,8 @@ bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "rules_shell", version = "0.8.0")
 
 # Public binary toolchain. Per-platform repos (valkey_<ver>_<plat>) come
-# from the `valkey` extension, which only honours the root module's tags —
-# consumers declare the same version.
+# from the `valkey` extension: this version plus any the root module sets.
+# Consumers need no extension wiring.
 valkey = use_extension("//:extensions.bzl", "valkey")
 valkey.version(version = "9.1.3")
 use_repo(

@@ -17,11 +17,11 @@ No host `valkey-server` or compiler needed. The binaries come from a pinned, SHA
 ## Install (Bzlmod)
 
 ```python
-bazel_dep(name = "rules_valkey", version = "0.2.0")
+bazel_dep(name = "rules_valkey", version = "0.2.1")
 git_override(
     module_name = "rules_valkey",
     remote = "https://github.com/collider-bazel-extensions/rules_valkey",
-    tag = "v0.2.0",
+    tag = "v0.2.1",
 )
 
 # rules_valkey depends on rules_kubectl, which isn't in the BCR either.
@@ -30,16 +30,6 @@ git_override(
     module_name = "rules_kubectl",
     remote = "https://github.com/collider-bazel-extensions/rules_kubectl",
     commit = "81b60ab80df46b64c612f2576ffef0a7af98ccb6",  # v0.2.0
-)
-
-valkey = use_extension("@rules_valkey//:extensions.bzl", "valkey")
-valkey.version(version = "9.1.3")
-use_repo(
-    valkey,
-    "valkey_9_1_3_darwin_amd64",
-    "valkey_9_1_3_darwin_arm64",
-    "valkey_9_1_3_linux_amd64",
-    "valkey_9_1_3_linux_arm64",
 )
 ```
 
@@ -54,7 +44,16 @@ archive_override(
 )
 ```
 
-The `valkey` extension only honours the root module's `version` tags (the `mod.is_root` guard used across this organization), so declare it in your own `MODULE.bazel`. rules_valkey registers the toolchains itself.
+That's all the wiring: rules_valkey's own `MODULE.bazel` fetches Valkey 9.1.3 and registers the toolchains. To fetch another supported version as well, set it in your root module:
+
+```python
+valkey = use_extension("@rules_valkey//:extensions.bzl", "valkey")
+valkey.version(version = "9.1.3")
+```
+
+The extension fetches the root module's versions plus rules_valkey's own (the repos are named by version, `valkey_<ver>_<plat>`, so they never collide); other modules' tags are ignored. A version without a conda closure in `private/conda_versions.bzl` fails with a message naming `valkey.version`. Through v0.2.0 the root had to call `valkey.version()`, or resolution failed with `does not generate repository "valkey_9_1_3_darwin_amd64"`; the `use_extension` / `use_repo` lines earlier READMEs asked for are harmless.
+
+The release archive (the tag tarball) leaves out `tests/` and `tools/`, whose packages load dev-only modules, so `bazel query @rules_valkey//...` works for consumers. A `git_override` clone still contains them; name packages instead (for example `@rules_valkey//:all`).
 
 ## Config
 
