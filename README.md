@@ -40,7 +40,7 @@ archive_override(
     module_name = "rules_valkey",
     urls = ["https://github.com/collider-bazel-extensions/rules_valkey/archive/refs/tags/v0.2.2.tar.gz"],
     strip_prefix = "rules_valkey-0.2.2",
-    integrity = "sha256-9wDhYVGk3yzw/yf9AaCQaY2b7/6B+MhH+vRPuND/coo=",
+    integrity = "sha256-HGpHkCYDE3OhZS9aXbISYgEm+LimdgNCX2GsKW5C/j4=",
 )
 ```
 
